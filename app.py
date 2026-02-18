@@ -4,69 +4,79 @@ import pandas as pd
 import re
 from io import BytesIO
 
-st.set_page_config(page_title="ITV Parser Pro", layout="wide")
+st.set_page_config(page_title="Pelindo ITV Recap", layout="wide")
 
-st.title("⚓ ITV Operator Extractor")
-st.write("Ekstraksi otomatis ITV, ID, dan Nama Operator.")
+st.title("⚓ Rekap ITV, ID, dan Nama Operator")
+st.write("Aplikasi ini didesain khusus untuk format tabel Manning Pelindo.")
 
-uploaded_files = st.file_uploader("Upload PDF", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Unggah PDF (01, 16, atau 28 Jan)", type="pdf", accept_multiple_files=True)
 
-def extract_data_flexible(file):
-    results = []
+def clean_text(text):
+    if text:
+        return re.sub(r'\s+', ' ', str(text)).strip()
+    return ""
+
+def extract_itv_data(file):
+    extracted_rows = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            # Ambil semua kata beserta posisinya
-            words = page.extract_words()
+            # Gunakan extract_table dengan seting toleransi lebih tinggi
+            table = page.extract_table({
+                "vertical_strategy": "text", 
+                "horizontal_strategy": "text",
+            })
             
-            for i, word in enumerate(words):
-                text = word['text'].strip()
-                
-                # 1. Cari Nomor ITV (2-3 digit angka, misal 238, 255, 307)
-                if re.match(r'^\d{3}$', text):
-                    itv_no = text
-                    
-                    # 2. Cari Operator di kata-kata setelahnya (mencari pola ID 4 digit)
-                    # Kita scan hingga 15 kata ke depan untuk menemukan ID Operator
-                    for j in range(i + 1, min(i + 15, len(words))):
-                        potential_op = words[j]['text'].strip()
+            if not table:
+                # Fallback ke pencarian baris manual jika tabel gagal terdeteksi
+                table = page.extract_table()
+
+            if table:
+                for row in table:
+                    for cell in row:
+                        if not cell: continue
+                        val = clean_text(cell)
                         
-                        # Cek jika menemukan ID 4 digit (seperti 7230, 7111, dll)
-                        if re.match(r'^\d{4}$', potential_op):
-                            op_id = potential_op
-                            
-                            # Ambil nama (biasanya 2-4 kata setelah ID)
-                            name_parts = []
-                            for k in range(j + 1, min(j + 5, len(words))):
-                                # Berhenti jika ketemu angka lagi (berarti sudah ITV baru/ID baru)
-                                if words[k]['text'].isdigit():
-                                    break
-                                name_parts.append(words[k]['text'])
-                            
-                            op_name = " ".join(name_parts)
-                            
-                            results.append({
-                                "Nomor ITV": itv_no,
-                                "Nomor Operator": op_id,
-                                "Nama Operator": op_name
+                        # Cari pola: Angka ITV (3 digit) dan di dalamnya ada ID (4 digit)
+                        # Seringkali di PDF Pelindo, ITV dan Nama tergabung dalam satu sel atau sel berdekatan
+                        itv_match = re.search(r'\b(\d{3})\b', val)
+                        op_match = re.search(r'(\d{4})\s+([A-Z\s\.,]+)', val)
+                        
+                        if itv_match and op_match:
+                            extracted_rows.append({
+                                "Nomor ITV": itv_match.group(1),
+                                "Nomor Operator": op_match.group(1),
+                                "Nama Operator": op_match.group(2).strip()
                             })
-                            break
-    return results
+                        # Kondisi jika ITV dan Operator terpisah kolom (ITV di sel ini, Op di sel lain)
+                        elif re.fullmatch(r'\d{3}', val):
+                            itv_no = val
+                            # Cari di sel lain dalam baris yang sama yang punya 4 digit ID
+                            for other_cell in row:
+                                other_val = clean_text(other_cell)
+                                op_only_match = re.search(r'(\d{4})\s+([A-Z\s\.,]+)', other_val)
+                                if op_only_match:
+                                    extracted_rows.append({
+                                        "Nomor ITV": itv_no,
+                                        "Nomor Operator": op_only_match.group(1),
+                                        "Nama Operator": op_only_match.group(2).strip()
+                                    })
+    return extracted_rows
 
 if uploaded_files:
-    all_data = []
+    all_results = []
     for f in uploaded_files:
-        records = extract_data_flexible(f)
-        all_data.extend(records)
+        data = extract_itv_data(f)
+        all_results.extend(data)
     
-    if all_data:
-        df = pd.DataFrame(all_data).drop_duplicates()
-        st.success(f"Ditemukan {len(df)} data operator.")
+    if all_results:
+        df = pd.DataFrame(all_results).drop_duplicates()
+        st.success(f"Ditemukan {len(df)} data.")
         st.dataframe(df, use_container_width=True)
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='Data_ITV')
         
-        st.download_button("📥 Download Excel", output.getvalue(), "rekap_itv.xlsx")
+        st.download_button("📥 Download Excel (3 Kolom)", output.getvalue(), "rekap_itv_final.xlsx")
     else:
-        st.error("Data tidak ditemukan. Pastikan PDF memiliki teks yang dapat dibaca (bukan hasil scan gambar murni).")
+        st.warning("Data tidak ditemukan. Cobalah untuk memeriksa apakah file PDF tersebut bisa di-copy teksnya secara manual.")
