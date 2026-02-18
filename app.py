@@ -4,75 +4,69 @@ import pandas as pd
 import re
 from io import BytesIO
 
-st.set_page_config(page_title="ITV Recap Tool", layout="wide")
+st.set_page_config(page_title="ITV Parser Pro", layout="wide")
 
-st.title("📊 Rekap Operator ITV (3 Kolom)")
-st.write("Aplikasi ini mengekstrak data ITV, ID Operator, dan Nama Operator ke dalam format Excel bersih.")
+st.title("⚓ ITV Operator Extractor")
+st.write("Ekstraksi otomatis ITV, ID, dan Nama Operator.")
 
-uploaded_files = st.file_uploader("Unggah PDF Manning & Deployment", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF", type="pdf", accept_multiple_files=True)
 
-def clean_and_parse(text):
-    if not text:
-        return None, None
-    # Membersihkan karakter baru dan spasi berlebih
-    text = text.replace('\n', ' ').strip()
-    # Mencari pola ID (4 digit angka) di awal teks
-    match = re.match(r'^(\d{4})\s+(.*)', text)
-    if match:
-        return match.group(1), match.group(2)
-    return None, text
-
-def process_to_three_columns(file):
-    extracted_data = []
+def extract_data_flexible(file):
+    results = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            table = page.extract_table({
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines"
-            })
+            # Ambil semua kata beserta posisinya
+            words = page.extract_words()
             
-            if table:
-                for row in table:
-                    # Iterasi setiap sel dalam baris untuk mencari pasangan ITV dan Operator
-                    # Berdasarkan struktur PDF, biasanya ITV ada di baris atas dan Operator di bawahnya
-                    # atau berada di kolom yang bersebelahan.
-                    for i, cell in enumerate(row):
-                        if cell and str(cell).isdigit() and len(str(cell)) <= 3:
-                            itv_number = cell
-                            # Cek sel di bawahnya atau di sebelahnya untuk data operator
-                            # Kita cari pola 4 digit ID dalam tabel
-                            for search_cell in row:
-                                if search_cell and re.search(r'\d{4}', str(search_cell)):
-                                    op_id, op_name = clean_and_parse(search_cell)
-                                    if op_id:
-                                        extracted_data.append({
-                                            "Nomor ITV": itv_number,
-                                            "Nomor Operator": op_id,
-                                            "Nama Operator": op_name
-                                        })
-                                        break
-    return extracted_data
+            for i, word in enumerate(words):
+                text = word['text'].strip()
+                
+                # 1. Cari Nomor ITV (2-3 digit angka, misal 238, 255, 307)
+                if re.match(r'^\d{3}$', text):
+                    itv_no = text
+                    
+                    # 2. Cari Operator di kata-kata setelahnya (mencari pola ID 4 digit)
+                    # Kita scan hingga 15 kata ke depan untuk menemukan ID Operator
+                    for j in range(i + 1, min(i + 15, len(words))):
+                        potential_op = words[j]['text'].strip()
+                        
+                        # Cek jika menemukan ID 4 digit (seperti 7230, 7111, dll)
+                        if re.match(r'^\d{4}$', potential_op):
+                            op_id = potential_op
+                            
+                            # Ambil nama (biasanya 2-4 kata setelah ID)
+                            name_parts = []
+                            for k in range(j + 1, min(j + 5, len(words))):
+                                # Berhenti jika ketemu angka lagi (berarti sudah ITV baru/ID baru)
+                                if words[k]['text'].isdigit():
+                                    break
+                                name_parts.append(words[k]['text'])
+                            
+                            op_name = " ".join(name_parts)
+                            
+                            results.append({
+                                "Nomor ITV": itv_no,
+                                "Nomor Operator": op_id,
+                                "Nama Operator": op_name
+                            })
+                            break
+    return results
 
 if uploaded_files:
-    all_records = []
+    all_data = []
     for f in uploaded_files:
-        data = process_to_three_columns(f)
-        all_records.extend(data)
+        records = extract_data_flexible(f)
+        all_data.extend(records)
     
-    if all_records:
-        df_final = pd.DataFrame(all_records).drop_duplicates()
-        
-        st.success(f"Berhasil mengekstrak {len(df_final)} baris data.")
-        st.dataframe(df_final, use_container_width=True)
+    if all_data:
+        df = pd.DataFrame(all_data).drop_duplicates()
+        st.success(f"Ditemukan {len(df)} data operator.")
+        st.dataframe(df, use_container_width=True)
 
-        # Tombol Download
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_final.to_excel(writer, index=False, sheet_name='Rekap_ITV')
+            df.to_excel(writer, index=False, sheet_name='Data_ITV')
         
-        st.download_button(
-            label="📥 Download Excel 3 Kolom",
-            data=output.getvalue(),
-            file_name="rekap_itv_3_kolom.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 Download Excel", output.getvalue(), "rekap_itv.xlsx")
+    else:
+        st.error("Data tidak ditemukan. Pastikan PDF memiliki teks yang dapat dibaca (bukan hasil scan gambar murni).")
