@@ -1,82 +1,58 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
-import re
 from io import BytesIO
 
-st.set_page_config(page_title="Pelindo ITV Recap", layout="wide")
+st.set_page_config(page_title="PDF to Excel Converter (ITV)", layout="wide")
 
-st.title("⚓ Rekap ITV, ID, dan Nama Operator")
-st.write("Aplikasi ini didesain khusus untuk format tabel Manning Pelindo.")
+st.title("⚓ Rekap Manning ITV ke Excel")
+st.write("Unggah file PDF Manning & Deployment untuk dikonversi ke format Excel.")
 
-uploaded_files = st.file_uploader("Unggah PDF (01, 16, atau 28 Jan)", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Pilih file PDF", type="pdf", accept_multiple_files=True)
 
-def clean_text(text):
-    if text:
-        return re.sub(r'\s+', ' ', str(text)).strip()
-    return ""
-
-def extract_itv_data(file):
-    extracted_rows = []
+def process_pdf(file):
+    all_data = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            # Gunakan extract_table dengan seting toleransi lebih tinggi
+            # Ekstrak tabel dengan konfigurasi agar teks tidak berantakan
             table = page.extract_table({
-                "vertical_strategy": "text", 
-                "horizontal_strategy": "text",
+                "vertical_strategy": "lines", 
+                "horizontal_strategy": "lines",
+                "intersection_y_tolerance": 10
             })
             
-            if not table:
-                # Fallback ke pencarian baris manual jika tabel gagal terdeteksi
-                table = page.extract_table()
-
             if table:
-                for row in table:
-                    for cell in row:
-                        if not cell: continue
-                        val = clean_text(cell)
-                        
-                        # Cari pola: Angka ITV (3 digit) dan di dalamnya ada ID (4 digit)
-                        # Seringkali di PDF Pelindo, ITV dan Nama tergabung dalam satu sel atau sel berdekatan
-                        itv_match = re.search(r'\b(\d{3})\b', val)
-                        op_match = re.search(r'(\d{4})\s+([A-Z\s\.,]+)', val)
-                        
-                        if itv_match and op_match:
-                            extracted_rows.append({
-                                "Nomor ITV": itv_match.group(1),
-                                "Nomor Operator": op_match.group(1),
-                                "Nama Operator": op_match.group(2).strip()
-                            })
-                        # Kondisi jika ITV dan Operator terpisah kolom (ITV di sel ini, Op di sel lain)
-                        elif re.fullmatch(r'\d{3}', val):
-                            itv_no = val
-                            # Cari di sel lain dalam baris yang sama yang punya 4 digit ID
-                            for other_cell in row:
-                                other_val = clean_text(other_cell)
-                                op_only_match = re.search(r'(\d{4})\s+([A-Z\s\.,]+)', other_val)
-                                if op_only_match:
-                                    extracted_rows.append({
-                                        "Nomor ITV": itv_no,
-                                        "Nomor Operator": op_only_match.group(1),
-                                        "Nama Operator": op_only_match.group(2).strip()
-                                    })
-    return extracted_rows
+                df = pd.DataFrame(table)
+                # Membersihkan karakter '\n' yang sering muncul di PDF
+                df = df.applymap(lambda x: x.replace('\n', ' ') if isinstance(x, str) else x)
+                all_data.append(df)
+    
+    if all_data:
+        return pd.concat(all_data, ignore_index=True)
+    return None
 
 if uploaded_files:
-    all_results = []
-    for f in uploaded_files:
-        data = extract_itv_data(f)
-        all_results.extend(data)
+    # Gabungkan semua PDF yang diunggah jika ada banyak
+    final_df_list = []
+    for uploaded_file in uploaded_files:
+        df_result = process_pdf(uploaded_file)
+        if df_result is not None:
+            final_df_list.append(df_result)
     
-    if all_results:
-        df = pd.DataFrame(all_results).drop_duplicates()
-        st.success(f"Ditemukan {len(df)} data.")
-        st.dataframe(df, use_container_width=True)
+    if final_df_list:
+        combined_df = pd.concat(final_df_list, ignore_index=True)
+        
+        st.success(f"Berhasil memproses {len(uploaded_files)} file!")
+        st.dataframe(combined_df) # Tampilkan preview
 
+        # Tombol Download Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Data_ITV')
+            combined_df.to_excel(writer, index=False, header=False, sheet_name='Rekap_Manning')
         
-        st.download_button("📥 Download Excel (3 Kolom)", output.getvalue(), "rekap_itv_final.xlsx")
-    else:
-        st.warning("Data tidak ditemukan. Cobalah untuk memeriksa apakah file PDF tersebut bisa di-copy teksnya secara manual.")
+        st.download_button(
+            label="Download Excel (.xlsx)",
+            data=output.getvalue(),
+            file_name="rekap_manning_deployment.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
