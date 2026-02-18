@@ -1,58 +1,78 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
+import re
 from io import BytesIO
 
-# Konfigurasi Halaman
-st.set_page_config(page_title="PDF to Excel Converter - Pelindo", layout="wide")
+st.set_page_config(page_title="ITV Recap Tool", layout="wide")
 
-st.title("🚢 Pelindo PDF to Excel Converter")
-st.markdown("Unggah file PDF Manning & Deployment untuk rekap otomatis tanpa merusak tata letak kolom.")
+st.title("📊 Rekap Operator ITV (3 Kolom)")
+st.write("Aplikasi ini mengekstrak data ITV, ID Operator, dan Nama Operator ke dalam format Excel bersih.")
 
-# Upload File
-uploaded_files = st.file_uploader("Pilih satu atau beberapa file PDF", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Unggah PDF Manning & Deployment", type="pdf", accept_multiple_files=True)
 
-def extract_table_from_pdf(file):
-    all_rows = []
+def clean_and_parse(text):
+    if not text:
+        return None, None
+    # Membersihkan karakter baru dan spasi berlebih
+    text = text.replace('\n', ' ').strip()
+    # Mencari pola ID (4 digit angka) di awal teks
+    match = re.match(r'^(\d{4})\s+(.*)', text)
+    if match:
+        return match.group(1), match.group(2)
+    return None, text
+
+def process_to_three_columns(file):
+    extracted_data = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            # Menggunakan strategi 'lines' untuk menjaga presisi kolom seperti di PDF asli
             table = page.extract_table({
                 "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-                "snap_y_tolerance": 5,
-                "intersection_x_tolerance": 5,
+                "horizontal_strategy": "lines"
             })
+            
             if table:
-                all_rows.extend(table)
-    return all_rows
+                for row in table:
+                    # Iterasi setiap sel dalam baris untuk mencari pasangan ITV dan Operator
+                    # Berdasarkan struktur PDF, biasanya ITV ada di baris atas dan Operator di bawahnya
+                    # atau berada di kolom yang bersebelahan.
+                    for i, cell in enumerate(row):
+                        if cell and str(cell).isdigit() and len(str(cell)) <= 3:
+                            itv_number = cell
+                            # Cek sel di bawahnya atau di sebelahnya untuk data operator
+                            # Kita cari pola 4 digit ID dalam tabel
+                            for search_cell in row:
+                                if search_cell and re.search(r'\d{4}', str(search_cell)):
+                                    op_id, op_name = clean_and_parse(search_cell)
+                                    if op_id:
+                                        extracted_data.append({
+                                            "Nomor ITV": itv_number,
+                                            "Nomor Operator": op_id,
+                                            "Nama Operator": op_name
+                                        })
+                                        break
+    return extracted_data
 
 if uploaded_files:
-    combined_data = []
+    all_records = []
+    for f in uploaded_files:
+        data = process_to_three_columns(f)
+        all_records.extend(data)
     
-    for file in uploaded_files:
-        data = extract_table_from_pdf(file)
-        if data:
-            # Membersihkan teks dari karakter enter (\n) agar rapi di Excel
-            df = pd.DataFrame(data)
-            df = df.applymap(lambda x: x.replace('\n', ' ') if isinstance(x, str) else x)
-            combined_data.append(df)
-    
-    if combined_data:
-        # Menggabungkan semua PDF menjadi satu sheet
-        final_df = pd.concat(combined_data, ignore_index=True)
+    if all_records:
+        df_final = pd.DataFrame(all_records).drop_duplicates()
         
-        st.success(f"✅ Berhasil memproses {len(uploaded_files)} file!")
-        st.dataframe(final_df) # Preview data
+        st.success(f"Berhasil mengekstrak {len(df_final)} baris data.")
+        st.dataframe(df_final, use_container_width=True)
 
-        # Proses Download ke Excel
+        # Tombol Download
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            final_df.to_excel(writer, index=False, header=False, sheet_name='Rekap_ITV')
+            df_final.to_excel(writer, index=False, sheet_name='Rekap_ITV')
         
         st.download_button(
-            label="📥 Download Excel (.xlsx)",
+            label="📥 Download Excel 3 Kolom",
             data=output.getvalue(),
-            file_name="rekap_pelindo_itv.xlsx",
+            file_name="rekap_itv_3_kolom.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
